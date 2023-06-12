@@ -1,11 +1,13 @@
 use std::io::Write;
 use std::path::Path;
-use std::{fs::{self, File}, error::Error, process};
+use std::{fs::{self, File}, error::Error};
+use std::process::ExitCode;
 use clap::Parser;
 use junit_report::{Duration, ReportBuilder, TestCase, TestCaseBuilder, TestSuiteBuilder};
 
 use lenient_bool::LenientBool;
 use texting_robots::Robot;
+use rayon::prelude::*;
 
 /// Simple program to validate robots.txt files against test cases
 #[derive(Parser, Debug)]
@@ -24,7 +26,7 @@ struct Args {
     generate_test_report: bool,
 }
 
-fn main() { 
+fn main() -> ExitCode {
     let start = std::time::Instant::now();
     let args = Args::parse();
     let robots_content = fs::read_to_string(args.robots_text_file_path).expect("Unable to read robots.txt file");
@@ -35,11 +37,11 @@ fn main() {
         Ok(test_cases)  => test_cases,
         Err(e) => {
             println!("error getting test cases: {}", e);
-            process::exit(1);
+            return ExitCode::FAILURE;
         },
     };
 
-    let test_results: Vec<TestCaseOutput> = test_cases.iter()
+    let test_results: Vec<TestCaseOutput> = test_cases.par_iter()
         .map(|test| {
             let matcher_result = r.allowed(&test.url);
             // println!("Expected result: {}, result: {}", test.expected_result, matcher_result);
@@ -53,29 +55,32 @@ fn main() {
         .collect();
 
     // Generate JUnit XML
-    if args.generate_test_report {
-        let test_case_input_file_name = Path::new(&args.test_case_file_path)
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .replace(".csv", "");
+    let (_, exit_code) = rayon::join(
+      || {
+          if args.generate_test_report {
+              let test_case_input_file_name = Path::new(&args.test_case_file_path)
+                  .file_name()
+                  .unwrap()
+                  .to_str()
+                  .unwrap()
+                  .replace(".csv", "");
 
-        generate_test_report(&test_results, &test_case_input_file_name);
-    }
+              generate_test_report(&test_results, &test_case_input_file_name);
+          }
+      },
+      || {
+          let total_test_count = test_results.len();
+          let passed_test_count = test_results.par_iter().filter(|n| n.result).count();
+          let failed_test_count = total_test_count - passed_test_count;
+          println!("Test cases run: {}", total_test_count);
+          println!("Passed tests: {}", passed_test_count);
+          println!("Failed tests: {}", failed_test_count);
+          println!("Elapsed time {:.2}ms", start.elapsed().as_millis());
+          if failed_test_count > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+      }
+    );
 
-    let total_test_count = test_results.len();
-    let passed_test_count = test_results.iter().filter(|n| n.result).count();
-    let failed_test_count = total_test_count - passed_test_count;
-    println!("Test cases run: {}", total_test_count);
-    println!("Passed tests: {}", passed_test_count);
-    println!("Failed tests: {}", failed_test_count);
-    println!("Elapsed time {:.2}ms", start.elapsed().as_millis());
-
-    // Exit with an error code if any of the tests failed
-    if failed_test_count > 0 {
-        process::exit(1);
-    }
+    exit_code
 }
 
 fn generate_test_report(test_results: &[TestCaseOutput], test_suite_name: &str) {
@@ -137,7 +142,7 @@ struct TestCaseOutput<'a> {
 
 fn get_test_cases(file_path: &str) -> Result<Vec<TestCaseDefinition>, Box<dyn Error>> {
     let test_case_content = fs::read_to_string(file_path)?;
-    let mut test_cases: Vec<TestCaseDefinition> = Vec::new();
+    let mut test_cases: Vec<TestCaseDefinition> = Vec::with_capacity(test_case_content.lines().count());
     let mut rdr = csv::Reader::from_reader(test_case_content.as_bytes());
 
     for result in rdr.records() {

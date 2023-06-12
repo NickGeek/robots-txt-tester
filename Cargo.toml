@@ -12,3 +12,4 @@ junit-report = "0.8.2"
 lenient_bool = "0.1.1"
 texting_robots = "0.2.2"
 time = { version = "0.3.4", features = ["formatting", "macros"] }
+rayon = { version = "1.7.0" }
